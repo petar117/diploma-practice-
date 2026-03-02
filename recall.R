@@ -1,6 +1,8 @@
 library(tidyverse)
 library(gapminder)
 library(dplyr)
+library(readtext)
+library(tidytext)
 
 df <- tibble(
   name = c("Alice", "Bob", "Charlie", "David", "Eve"),
@@ -187,7 +189,7 @@ dc <- tibble(text = doc$text) %>%
 
 # This is example of reading any text file and putting each word in separate row.
 # unnest_tokens basically does everything, it splits into words, lowers the case, removes punctuation, etc.
-doc <- readtext("country_vaccinations_by_manufacturer.csv")
+doc <- readtext("one.docx")
 
 dc <- tibble(text = doc$text) %>% 
   unnest_tokens(word,text) %>%
