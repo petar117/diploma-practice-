@@ -171,3 +171,24 @@ docs %>%
     most_common_word = word[which.max(table(word))],
     .groups = "drop")
   
+# This is example of reading .docx file and putting each sentence in separate row.
+document1 <- read_docx("one.docx")
+dc1 <- docx_summary(document1) %>% 
+  dplyr::filter(text!="") %>% 
+  select(text)
+
+# This is example of reading any text file and putting each sentence in separate row.
+doc <- readtext("one.docx")
+
+dc <- tibble(text = doc$text) %>% 
+  mutate(text = str_split(text, "\n")) %>% 
+  tidyr::unnest(text) %>% 
+  filter(text != "")
+
+# This is example of reading any text file and putting each word in separate row.
+# unnest_tokens basically does everything, it splits into words, lowers the case, removes punctuation, etc.
+doc <- readtext("country_vaccinations_by_manufacturer.csv")
+
+dc <- tibble(text = doc$text) %>% 
+  unnest_tokens(word,text) %>%
+  print(n=50)
