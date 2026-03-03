@@ -3,6 +3,7 @@ library(gapminder)
 library(dplyr)
 library(readtext)
 library(tidytext)
+library(wordcloud2)
 
 df <- tibble(
   name = c("Alice", "Bob", "Charlie", "David", "Eve"),
@@ -189,8 +190,37 @@ dc <- tibble(text = doc$text) %>%
 
 # This is example of reading any text file and putting each word in separate row.
 # unnest_tokens basically does everything, it splits into words, lowers the case, removes punctuation, etc.
-doc <- readtext("one.docx")
+
+library(textstem)
+# doc <- readtext("disposition - Petar Todorovski.pdf")
+# doc <- readtext("one.docx")
+doc <- readtext("book.pdf")
+
 
 dc <- tibble(text = doc$text) %>% 
   unnest_tokens(word,text) %>%
+  filter(str_detect(word, "^[a-z]+$")) %>% 
+  # anti_join(stop_words, by = "word") %>%
+  anti_join(
+    bind_rows(stop_words, tibble(word = "chapter")),
+    by = "word"
+  ) %>% 
+  mutate(word_lemma = lemmatize_words(word)) %>% 
   print(n=50)
+  
+dc %>% 
+  group_by(word) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  slice_head() %>% 
+  pull(word)
+#or use shorter 
+dc %>% 
+  count(word_lemma, sort = TRUE) %>% 
+  slice_max(n, n=100) %>%
+  wordcloud2()
+
+
+# I should let user decide on the beginning if he want to use lemmatization
+# in the analysis, and based on that decision to select corresponding column 
+# problem with words like "not good"
