@@ -270,3 +270,4 @@ dc %>%
 # I should let user decide on the beginning if he want to use lemmatization
 # in the analysis, and based on that decision to select corresponding column
 # problem with words like "not good"
+
