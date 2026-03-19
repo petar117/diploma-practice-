@@ -1,9 +1,9 @@
 library(tidyverse)
-library(dplyr)
 library(readtext)
-library(tibble)
 library(tidytext)
 library(textstem)
+library(wordcloud2)
+library(DT)
 
 read_document <- function(filename) {
   readtext::readtext(filename)
@@ -19,48 +19,49 @@ custom_stopwords <- bind_rows(
 )
 
 tokenize_text <- function(doc) {
-  tibble(text = doc$text) %>% # is it good practice? we already have df from readtext
-    unnest_tokens(word, text) %>%
-    filter(str_detect(word, "^[a-z]+$")) %>%
-    anti_join(custom_stopwords, by = "word") %>%
-    mutate(word_lemma = lemmatize_words(word))
+  tibble(text = doc$text) |> # we already have df from readtext
+    unnest_tokens(word, text) |>
+    filter(str_detect(word, "^[a-z]+$")) |>
+    anti_join(custom_stopwords, by = "word") |>
+    mutate(word_lemma = lemmatize_words(word)) 
 }
 tokens <- tokenize_text(doc2)
 
 # The function uses nonlematized words
 word_count_1 <- function(tokens) {
-  tokens %>%
+  tokens |>
     count(word, sort = TRUE)
 }
 
 # The function uses lematized words
 word_count_2 <- function(tokens) {
-  tokens %>%
-    group_by(word_lemma) %>%
-    summarise(count = n()) %>%
+  tokens |>
+    group_by(word_lemma) |>
+    summarise(count = n()) |>
     arrange(desc(count))
 }
 
 # Pull the word with most occurrences
-word_count_1(tokens) %>%
-  slice_head() %>%
+word_count_1(tokens) |>
+  slice_head() |>
   pull(word)
 
 # Create a wordcloud with the top 100 words in the document
-word_count_2(tokens) %>%
-  slice_max(count, n = 100) %>%
+word_count_2(tokens) |>
+  slice_max(count, n = 100) |>
   wordcloud2()
 
 # Create a word frequency table
-word_count_2(tokens) %>%
+# Limit with sample 
+word_count_2(tokens) |>
   datatable(
     options = list(pageLength = 10),
     colnames = c("Word", "Frequency")
   )
 
 # Create a barchart showing the top 10 most common words
-word_count_2(tokens) %>%
-  slice_max(count, n = 10) %>%
+word_count_2(tokens) |>
+  slice_max(count, n = 10) |>
   ggplot(aes(
     x = reorder(word_lemma, -count),
     y = count,
