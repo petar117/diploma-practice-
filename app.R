@@ -50,18 +50,35 @@ ui <- fluidPage(
       ),
       selectInput(
         "word_form",
-        "Analyze words as:",
+        "Analyze words as",
         choices = c(
           "Original words" = "original",
           "Lemmatized words" = "lemmatized"
         ),
         selected = "lemmatized"
+      ),
+      sliderInput(
+        "top_n",
+        "Top N words",
+        min = 5,
+        max = 50,
+        value = 10,
+        step = 1
+      ),
+      sliderInput(
+        "cloud_n",
+        "Number of words in word cloud",
+        min = 10,
+        max = 100,
+        value = 50,
+        step = 10
       )
     ),
 
     mainPanel(
       h4("Output will appear here"),
-      verbatimTextOutput("file_info")
+      DTOutput("frequency_table"),
+      wordcloud2Output("word_cloud", height = "600px")
     )
   )
 )
@@ -78,17 +95,42 @@ server <- function(input, output, session) {
   tokenize_text(document())
   })
 
-  counts <- reactive({
+  word_frequencies <- reactive({
   req(tokens())
   req(input$word_form)
 
   count_words(tokens(), input$word_form)
   })
 
-  output$file_info <- renderPrint({
-  req(counts())
-  head(counts(), 20)
+  output$frequency_table <- renderDT({
+  req(word_frequencies())
+
+  datatable(
+      word_frequencies(),
+      options = list(pageLength = 10),
+      colnames = c("Term", "Frequency")
+    )
   })
+
+  output$word_cloud <- renderWordcloud2({
+  req(word_frequencies())
+  req(input$cloud_n)
+
+  cloud_data <- word_frequencies() |>
+    dplyr::slice_head(n = input$cloud_n) |>
+    dplyr::rename(word = term, freq = count)
+
+  validate(
+    need(nrow(cloud_data) > 0, "No words available for the word cloud.")
+  )
+
+  wordcloud2::wordcloud2(
+    cloud_data,
+    size = 0.8,
+    color = "random-dark",
+    backgroundColor = "#F5F5F5",
+  )
+})
 
 }
 
