@@ -10,12 +10,26 @@ read_document <- function(filename) {
   readtext::readtext(filename)
 }
 
-custom_stopwords <- bind_rows(
-  tidytext::stop_words,
-  tibble(word = "chapter")
-)
+prepare_stopwords <- function(stopword_input) {
+  if (is.null(stopword_input) || !nzchar(stopword_input)) {
+    return(tidytext::stop_words)
+  }
 
-tokenize_text <- function(document) {
+  stopword_input |> 
+    strsplit("\\r?\\n") |>
+    unlist(use.names = FALSE) |> 
+    stringr::str_trim() |>
+    stringr::str_to_lower() -> extra_stopwords
+
+  extra_stopwords <- extra_stopwords[nzchar(extra_stopwords)]
+
+  dplyr::bind_rows(
+    tidytext::stop_words,
+    tibble::tibble(word = extra_stopwords)
+  )
+}
+
+tokenize_text <- function(document, custom_stopwords) {
   tibble::tibble(text = document$text) |>
     tidytext::unnest_tokens(word, text) |>
     dplyr::filter(stringr::str_detect(word, "^[a-z]+$")) |>
@@ -72,13 +86,20 @@ ui <- fluidPage(
         max = 100,
         value = 50,
         step = 10
+      ),
+      textAreaInput(
+        "custom_words",
+        "Extra stopwords (one per line)",
+        placeholder = "names\nproject\netc",
+        rows = 5
       )
     ),
 
     mainPanel(
-      h4("Output will appear here"),
-      DTOutput("frequency_table"),
-      wordcloud2Output("word_cloud", height = "600px")
+      #h4("Output will appear here"),
+      #DTOutput("frequency_table"),
+      wordcloud2Output("word_cloud", height = "600px"),
+      plotOutput("bar_chart", height = "450px")
     )
   )
 )
@@ -92,7 +113,7 @@ server <- function(input, output, session) {
 
   tokens <- reactive({
   req(document())
-  tokenize_text(document())
+  tokenize_text(document(), prepare_stopwords(input$custom_words))
   })
 
   word_frequencies <- reactive({
@@ -129,8 +150,25 @@ server <- function(input, output, session) {
     size = 0.8,
     color = "random-dark",
     backgroundColor = "#F5F5F5",
-  )
-})
+    )
+  })
+  
+  output$bar_chart <- renderPlot({
+    plot_data <- word_frequencies() |> 
+      dplyr::slice_head(n = input$top_n) |> 
+      mutate(term = reorder(term, count))
+
+    ggplot2::ggplot(plot_data, aes(x = term, y = count)) +
+      geom_col(fill = "#1f5c99") +
+      coord_flip() +
+      labs(
+        title = "Most frequent terms",
+        x = NULL,
+        y = "Count"
+      ) +
+      theme_minimal(base_size = 13)
+  })
+  
 
 }
 
