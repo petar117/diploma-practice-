@@ -96,10 +96,17 @@ ui <- fluidPage(
     ),
 
     mainPanel(
-      #h4("Output will appear here"),
-      #DTOutput("frequency_table"),
-      wordcloud2Output("word_cloud", height = "600px"),
-      plotOutput("bar_chart", height = "450px")
+      tabsetPanel(
+        tabPanel(
+          plotOutput("bar_chart", height = "450px")
+        ),
+        tabPanel(
+          DTOutput("frequency_table")
+        ),
+        tabPanel(
+          wordcloud2Output("word_cloud", height = "600px")
+        )
+      ),
     )
   )
 )
