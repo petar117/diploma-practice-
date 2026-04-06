@@ -34,26 +34,52 @@ tokenize_text <- function(document, custom_stopwords) {
     tidytext::unnest_tokens(word, text) |>
     dplyr::filter(stringr::str_detect(word, "^[a-z]+$")) |>
     dplyr::anti_join(custom_stopwords, by = "word") |>
-    dplyr::mutate(word_lemma = textstem::lemmatize_words(word))
+    dplyr::mutate(
+      token_index = dplyr::row_number(),
+      word_lemma = textstem::lemmatize_words(word))
 }
 
-count_words <- function(tokens, word_form) {
-  selected_column <- switch(
+get_selected_column <- function(word_form) {
+  switch(
     word_form,
     original = "word",
     lemmatized = "word_lemma",
     "word_lemma"
   )
+}
+
+count_words <- function(tokens, word_form) {
+  selected_column <- get_selected_column(word_form)
 
   tokens |>
     dplyr::count(.data[[selected_column]], sort = TRUE, name = "count") |>
     dplyr::rename(term = 1)
   }
 
+build_topic_input <- function(tokens, word_form, chunk_size = 200) {
+  selected_column <- get_selected_column(word_form)
 
+  tokens |> 
+    dplyr::arrange(token_index) |> 
+    dplyr::mutate(chunk_id = ceiling(token_index / chunk_size)) |> 
+    dplyr::transmute(
+      document = paste0("Chunk ", chunk_id),
+      term = .data[[selected_column]]
+    ) |> 
+    dplyr::count(document, term, name = "count")
+}
+
+build_topic_dtm <- function(topic_input) {
+  tidytext::cast_dtm(
+    topic_input,
+    document = document,
+    term = term,
+    value = count
+  )
+}
 
 ui <- fluidPage(
-  titlePanel("Text Mining App"),
+  titlePanel("Text Mining App #1"),
 
   sidebarLayout(
     sidebarPanel(
@@ -87,6 +113,14 @@ ui <- fluidPage(
         value = 50,
         step = 10
       ),
+      sliderInput(
+        "num_topics",
+        "Number of topics",
+        min = 2,
+        max = 8,
+        value = 3,
+        step = 1
+      ),
       textAreaInput(
         "custom_words",
         "Extra stopwords (one per line)",
@@ -98,13 +132,20 @@ ui <- fluidPage(
     mainPanel(
       tabsetPanel(
         tabPanel(
+          "Top terms",
           plotOutput("bar_chart", height = "450px")
         ),
         tabPanel(
+          "Frequency table",
           DTOutput("frequency_table")
         ),
         tabPanel(
+          "Word cloud",
           wordcloud2Output("word_cloud", height = "600px")
+        ),
+        tabPanel(
+          "Topic input",
+          DTOutput("topic_input_table")
         )
       ),
     )
@@ -121,6 +162,19 @@ server <- function(input, output, session) {
   tokens <- reactive({
   req(document())
   tokenize_text(document(), prepare_stopwords(input$custom_words))
+  })
+
+  topic_input <- reactive({
+    req(tokens())
+    req(input$word_form)
+
+    build_topic_input(tokens(), input$word_form, chunk_size = 200)
+  })
+
+  topic_dtm <- reactive({
+    req(topic_input())
+
+    build_topic_dtm(topic_input())
   })
 
   word_frequencies <- reactive({
@@ -176,6 +230,25 @@ server <- function(input, output, session) {
       theme_minimal(base_size = 13)
   })
   
+  output$topic_input_table <- renderDT({
+    req(topic_input())
+
+    datatable(
+      topic_input(),
+      options = list(pageLenght = 10)
+    )
+  })
+
+  topic_model <- reactive({
+    req(topic_dtm())
+    req(input$num_topics)
+
+    topicmodels::LDA(
+      topic_dtm(),
+      k = input$num_topics,
+      control = list(seed = 1234)
+    )
+  })
 
 }
 
