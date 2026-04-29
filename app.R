@@ -1,10 +1,12 @@
 library(shiny)
+library(shinydashboard)
 library(tidyverse)
 library(readtext)
 library(tidytext)
 library(textstem)
 library(wordcloud2)
 library(DT)
+library(topicmodels)
 
 read_document <- function(filename) {
   readtext::readtext(filename)
@@ -15,9 +17,9 @@ prepare_stopwords <- function(stopword_input) {
     return(tidytext::stop_words)
   }
 
-  stopword_input |> 
+  stopword_input |>
     strsplit("\\r?\\n") |>
-    unlist(use.names = FALSE) |> 
+    unlist(use.names = FALSE) |>
     stringr::str_trim() |>
     stringr::str_to_lower() -> extra_stopwords
 
@@ -36,7 +38,8 @@ tokenize_text <- function(document, custom_stopwords) {
     dplyr::anti_join(custom_stopwords, by = "word") |>
     dplyr::mutate(
       token_index = dplyr::row_number(),
-      word_lemma = textstem::lemmatize_words(word))
+      word_lemma = textstem::lemmatize_words(word)
+    )
 }
 
 get_selected_column <- function(word_form) {
@@ -54,40 +57,92 @@ count_words <- function(tokens, word_form) {
   tokens |>
     dplyr::count(.data[[selected_column]], sort = TRUE, name = "count") |>
     dplyr::rename(term = 1)
-  }
-
-build_topic_input <- function(tokens, word_form, chunk_size = 200) {
-  selected_column <- get_selected_column(word_form)
-
-  tokens |> 
-    dplyr::arrange(token_index) |> 
-    dplyr::mutate(chunk_id = ceiling(token_index / chunk_size)) |> 
-    dplyr::transmute(
-      document = paste0("Chunk ", chunk_id),
-      term = .data[[selected_column]]
-    ) |> 
-    dplyr::count(document, term, name = "count")
 }
 
-build_topic_dtm <- function(topic_input) {
+split_document <- function(tokens, word_form, chunk_size) {
+  selected_column <- get_selected_column(word_form)
+
+  tokens |>
+    dplyr::mutate(
+      chunk_id = paste0("Chunk ", ceiling(token_index / chunk_size)),
+      term = .data[[selected_column]]
+    ) |>
+    dplyr::count(chunk_id, term, name = "count", sort = FALSE)
+}
+
+create_dtm <- function(document_chunks) {
   tidytext::cast_dtm(
-    topic_input,
-    document = document,
+    document_chunks,
+    document = chunk_id,
     term = term,
     value = count
   )
 }
 
-ui <- fluidPage(
-  titlePanel("Text Mining App #1"),
+create_topics <- function(lda_model, terms_per_topic) {
+  beta_matrix <- topicmodels::posterior(lda_model)$terms
 
-  sidebarLayout(
-    sidebarPanel(
+  purrr::map_dfr(seq_len(nrow(beta_matrix)), function(topic_id) {
+    topic_scores <- beta_matrix[topic_id, ]
+
+    top_index <- order(topic_scores, decreasing = TRUE)[
+      seq_len(min(terms_per_topic, length(topic_scores)))
+    ]
+
+    tibble::tibble(
+      topic = paste("Topic", topic_id),
+      term = names(topic_scores)[top_index],
+      beta = round(as.numeric(topic_scores[top_index]), 4)
+    )
+  })
+}
+
+create_topic_summary <- function(topics) {
+  topics |> 
+    dplyr::group_by(topic) |> 
+    dplyr::summarise(
+      top_words = paste(term, collapse = ', '),
+      .groups = "drop"
+    )
+}
+
+create_topic_distribution <- function(lda_model) {
+  gamma_matrix <- topicmodels::posterior(lda_model)$topics
+
+  topic_distribution <- colMeans(gamma_matrix)
+
+  tibble::tibble(
+    topic = paste("Topic", seq_along(topic_distribution)),
+    probability = round(as.numeric(topic_distribution), 4)
+  )
+}
+
+get_chunk_recommendation <- function(total_tokens) {
+  if (total_tokens < 500) {
+    return("80-120 words")
+  }
+
+  if (total_tokens < 1000) {
+    return("120-180 words")
+  }
+
+  "180-250 words"
+}
+
+ui <- dashboardPage(
+  dashboardHeader(title = "Text Mining App #1"),
+  dashboardSidebar(
+    width = 320,
+    tags$div(
+      style = "padding: 12px;",
+      h4("Document"),
       fileInput(
         "file",
         "Upload a file",
         accept = c(".txt", ".docx", ".pdf")
       ),
+      tags$hr(),
+      h4("Preprocessing"),
       selectInput(
         "word_form",
         "Analyze words as",
@@ -97,127 +152,428 @@ ui <- fluidPage(
         ),
         selected = "lemmatized"
       ),
-      sliderInput(
-        "top_n",
-        "Top N words",
-        min = 5,
-        max = 50,
-        value = 10,
-        step = 1
-      ),
-      sliderInput(
-        "cloud_n",
-        "Number of words in word cloud",
-        min = 10,
-        max = 100,
-        value = 50,
-        step = 10
-      ),
-      sliderInput(
-        "num_topics",
-        "Number of topics",
-        min = 2,
-        max = 8,
-        value = 3,
-        step = 1
-      ),
       textAreaInput(
         "custom_words",
-        "Extra stopwords (one per line)",
+        "Extra stopwords",
         placeholder = "names\nproject\netc",
-        rows = 5
-      )
-    ),
-
-    mainPanel(
-      tabsetPanel(
-        tabPanel(
-          "Top terms",
-          plotOutput("bar_chart", height = "450px")
-        ),
-        tabPanel(
-          "Frequency table",
-          DTOutput("frequency_table")
-        ),
-        tabPanel(
-          "Word cloud",
-          wordcloud2Output("word_cloud", height = "600px")
-        ),
-        tabPanel(
-          "Topic input",
-          DTOutput("topic_input_table")
+        rows = 4
+      ),
+      tags$hr(),
+      conditionalPanel(
+        condition = "input.main_tabs == 'Overview'",
+        h4("Frequency Options"),
+        sliderInput(
+          "top_n",
+          "Top N words",
+          min = 5,
+          max = 50,
+          value = 10,
+          step = 1
         )
       ),
+      conditionalPanel(
+        condition = "input.main_tabs == 'Word Cloud'",
+        h4("Word Cloud Options"),
+        sliderInput(
+          "cloud_n",
+          "Words in cloud",
+          min = 10,
+          max = 100,
+          value = 50,
+          step = 10
+        )
+      ),
+      conditionalPanel(
+        condition = "input.main_tabs == 'Topic Modeling'",
+        h4("Topic Modeling Options"),
+        sliderInput(
+          "chunk_size",
+          "Words per chunk",
+          min = 80,
+          max = 320,
+          value = 200,
+          step = 20
+        ),
+        selectInput(
+          "num_topics",
+          "Number of topics",
+          choices = 2:8,
+          selected = 3
+        ),
+        sliderInput(
+          "terms_per_topic",
+          "Top words per topic",
+          min = 4,
+          max = 10,
+          value = 6,
+          step = 1
+        )
+      )
+    )
+  ),
+  dashboardBody(
+    tags$head(
+      tags$style(HTML("
+        .content-wrapper, .right-side {
+          background-color: #f4f6f9;
+          margin-left: 320px;
+          padding-top: 50px;
+        }
+
+        .main-header {
+          position: fixed;
+          width: 100%;
+          top: 0;
+          z-index: 1050;
+        }
+
+        .main-sidebar {
+          position: fixed;
+          height: 100vh;
+          overflow-y: auto;
+          padding-top: 50px;
+        }
+
+        .sticky-tabs-wrapper {
+          position: relative;
+          padding-top: 46px;
+        }
+
+        .sticky-tabs-wrapper > .tabbable > .nav-tabs {
+          position: fixed;
+          top: 50px;
+          left: 320px;
+          right: 0;
+          z-index: 1040;
+          background: #f4f6f9;
+          border-bottom: 1px solid #d2d6de;
+          padding: 0 15px;
+          margin: 0;
+        }
+
+        .sticky-tabs-wrapper > .tabbable > .nav-tabs > li {
+          margin-bottom: -1px;
+        }
+
+        .sticky-tabs-wrapper > .tabbable > .nav-tabs > li > a {
+          background: transparent;
+          border: none;
+          border-bottom: 3px solid transparent;
+          border-radius: 0;
+          color: #3c8dbc;
+          margin-right: 18px;
+          padding: 14px 4px 10px 4px;
+        }
+
+        .sticky-tabs-wrapper > .tabbable > .nav-tabs > li.active > a,
+        .sticky-tabs-wrapper > .tabbable > .nav-tabs > li.active > a:focus,
+        .sticky-tabs-wrapper > .tabbable > .nav-tabs > li.active > a:hover {
+          border: none;
+          border-bottom: 3px solid #3c8dbc;
+          background: transparent;
+          color: #222d32;
+        }
+
+        .sticky-tabs-wrapper > .tabbable > .nav-tabs > li > a:hover {
+          background: transparent;
+          color: #222d32;
+        }
+
+        .small-box h3 {
+          font-size: 28px;
+        }
+
+        .info-box-text {
+          white-space: normal;
+        }
+      "))
+    ),
+    fluidRow(
+      column(
+        width = 12,
+        div(
+          class = "sticky-tabs-wrapper",
+          tabsetPanel(
+            id = "main_tabs",
+            tabPanel(
+              "Overview",
+              br(),
+              fluidRow(
+                valueBoxOutput("words_processed_box", width = 3),
+                valueBoxOutput("unique_words_box", width = 3),
+                valueBoxOutput("top_word_box", width = 3),
+                valueBoxOutput("rare_words_box", width = 3)
+              ),
+              fluidRow(
+                box(
+                  width = 6,
+                  title = "Top terms",
+                  status = "info",
+                  solidHeader = FALSE,
+                  plotOutput("bar_chart", height = "450px")
+                ),
+                box(
+                  width = 6,
+                  title = "Frequency table",
+                  status = "info",
+                  solidHeader = FALSE,
+                  DTOutput("frequency_table")
+                )
+              )
+            ),
+            tabPanel(
+              "Word Cloud",
+              br(),
+              box(
+                width = 12,
+                title = "Word Cloud",
+                status = "info",
+                solidHeader = FALSE,
+                wordcloud2Output("word_cloud", height = "600px")
+              )
+            ),
+            tabPanel(
+              "Topic Modeling",
+              br(),
+              fluidRow(
+                valueBoxOutput("usable_words_box", width = 3),
+                valueBoxOutput("chunk_size_box", width = 3),
+                valueBoxOutput("estimated_chunks_box", width = 3),
+                valueBoxOutput("suggested_chunk_size_box", width = 3)
+              ),
+              fluidRow(
+                box(
+                  width = 12,
+                  title = "Topic Modeling Guidance",
+                  status = "info",
+                  solidHeader = FALSE,
+                  p(textOutput("document_guidance")),
+                  p(textOutput("topic_guidance"))
+                )
+              ),
+              fluidRow(
+                box(
+                  width = 12,
+                  title = "Topic Summary",
+                  status = "success",
+                  solidHeader = FALSE,
+                  DTOutput("topic_summary_table")
+                )
+              ),
+              fluidRow(
+                box(
+                  width = 12,
+                  title = "Top Terms per Topic",
+                  status = "primary",
+                  solidHeader = FALSE,
+                  plotOutput("topic_terms_plot", height = "400px")
+                )
+              ),
+              fluidRow(
+                box(
+                  width = 12,
+                  title = "Topic Distribution",
+                  status = "primary",
+                  solidHeader = FALSE,
+                plotOutput("topic_distribution_plot", height = "350px")
+               )
+              ),
+              fluidRow(
+                box(
+                  width = 12,
+                  title = "Topics",
+                  status = "success",
+                  solidHeader = FALSE,
+                  DTOutput("topics_table")
+                )
+              )
+            )
+          )
+        )
+      )
     )
   )
 )
 
 server <- function(input, output, session) {
-
   document <- reactive({
     req(input$file)
     read_document(input$file$datapath)
   })
 
+  observeEvent(input$file, {
+    updateTextAreaInput(session, "custom_words", value = "")
+  })
+
   tokens <- reactive({
-  req(document())
-  tokenize_text(document(), prepare_stopwords(input$custom_words))
-  })
-
-  topic_input <- reactive({
-    req(tokens())
-    req(input$word_form)
-
-    build_topic_input(tokens(), input$word_form, chunk_size = 200)
-  })
-
-  topic_dtm <- reactive({
-    req(topic_input())
-
-    build_topic_dtm(topic_input())
+    req(document())
+    tokenize_text(document(), prepare_stopwords(input$custom_words))
   })
 
   word_frequencies <- reactive({
-  req(tokens())
-  req(input$word_form)
+    req(tokens())
+    count_words(tokens(), input$word_form)
+  })
 
-  count_words(tokens(), input$word_form)
+  document_chunks <- reactive({
+    req(tokens())
+    split_document(tokens(), input$word_form, chunk_size = input$chunk_size)
+  })
+
+  available_chunks <- reactive({
+    req(tokens())
+    req(input$chunk_size)
+    ceiling(nrow(tokens()) / input$chunk_size)
+  })
+
+  observe({
+    req(available_chunks(), input$num_topics)
+
+    max_topics_allowed <- min(8, max(2, available_chunks()))
+    topic_choices <- 2:max_topics_allowed
+    selected_topics <- min(as.numeric(input$num_topics), max_topics_allowed)
+
+    updateSelectInput(
+      session,
+      "num_topics",
+      choices = topic_choices,
+      selected = selected_topics
+    )
+  })
+
+  dtm <- reactive({
+    req(document_chunks())
+
+    dtm_data <- create_dtm(document_chunks())
+    dtm_dimensions <- dim(dtm_data)
+
+    validate(
+      need(
+        dtm_dimensions[1] >= as.numeric(input$num_topics),
+        "The number of chunks must be greater or equal to the number of topics."
+      ),
+      need(
+        dtm_dimensions[2] >= as.numeric(input$num_topics),
+        "There are not enough distinct terms for that many topics."
+      )
+    )
+
+    dtm_data
+  })
+
+  lda_model <- reactive({
+    req(dtm())
+
+    topicmodels::LDA(
+      dtm(),
+      k = as.numeric(input$num_topics),
+      control = list(seed = 1234)
+    )
+  })
+
+  topics <- reactive({
+    req(lda_model())
+    create_topics(lda_model(), input$terms_per_topic)
+  })
+
+  topic_summary <- reactive({
+    req(topics())
+    create_topic_summary(topics())
+  })
+
+  topic_distribution <- reactive({
+    req(lda_model())
+    create_topic_distribution(lda_model())
+  })
+
+  suggested_chunk_size <- reactive({
+    req(tokens())
+    get_chunk_recommendation(nrow(tokens()))
+  })
+
+  output$words_processed_box <- renderValueBox({
+    req(tokens())
+
+    valueBox(
+      value = format(nrow(tokens()), big.mark = ","),
+      subtitle = "Words after processing",
+      icon = icon("font"),
+      color = "light-blue"
+    )
+  })
+
+  output$unique_words_box <- renderValueBox({
+    req(word_frequencies())
+
+    valueBox(
+      value = nrow(word_frequencies()),
+      subtitle = "Unique words",
+      icon = icon("list"),
+      color = "teal"
+    )
+  })
+
+  output$top_word_box <- renderValueBox({
+    req(word_frequencies())
+
+    top_word <- word_frequencies() |> dplyr::slice_head(n = 1)
+
+    valueBox(
+      value = top_word$term,
+      subtitle = paste("Most frequent (", top_word$count, ")", sep = ""),
+      icon = icon("star"),
+      color = "yellow"
+    )
+  })
+
+  output$rare_words_box <- renderValueBox({
+    req(word_frequencies())
+
+    rare_words <- word_frequencies() |>
+      dplyr::filter(count == 1)
+
+    valueBox(
+      value = nrow(rare_words),
+      subtitle = "Rare words (appear once)",
+      icon = icon("search"),
+      color = "red"
+    )
   })
 
   output$frequency_table <- renderDT({
-  req(word_frequencies())
+    req(word_frequencies())
 
-  datatable(
+    datatable(
       word_frequencies(),
-      options = list(pageLength = 10),
+      options = list(pageLength = 5),
       colnames = c("Term", "Frequency")
     )
   })
 
   output$word_cloud <- renderWordcloud2({
-  req(word_frequencies())
-  req(input$cloud_n)
+    req(word_frequencies())
+    req(input$cloud_n)
 
-  cloud_data <- word_frequencies() |>
-    dplyr::slice_head(n = input$cloud_n) |>
-    dplyr::rename(word = term, freq = count)
+    cloud_data <- word_frequencies() |>
+      dplyr::slice_head(n = input$cloud_n) |>
+      dplyr::rename(word = term, freq = count)
 
-  validate(
-    need(nrow(cloud_data) > 0, "No words available for the word cloud.")
-  )
+    validate(
+      need(nrow(cloud_data) > 0, "No words available for the word cloud.")
+    )
 
-  wordcloud2::wordcloud2(
-    cloud_data,
-    size = 0.8,
-    color = "random-dark",
-    backgroundColor = "#F5F5F5",
+    wordcloud2::wordcloud2(
+      cloud_data,
+      size = 0.8,
+      color = "random-dark",
+      backgroundColor = "#F5F5F5"
     )
   })
-  
+
   output$bar_chart <- renderPlot({
-    plot_data <- word_frequencies() |> 
-      dplyr::slice_head(n = input$top_n) |> 
-      mutate(term = reorder(term, count))
+    plot_data <- word_frequencies() |>
+      dplyr::slice_head(n = input$top_n) |>
+      dplyr::mutate(term = reorder(term, count))
 
     ggplot2::ggplot(plot_data, aes(x = term, y = count)) +
       geom_col(fill = "#1f5c99") +
@@ -229,24 +585,171 @@ server <- function(input, output, session) {
       ) +
       theme_minimal(base_size = 13)
   })
-  
-  output$topic_input_table <- renderDT({
-    req(topic_input())
 
-    datatable(
-      topic_input(),
-      options = list(pageLenght = 10)
+  output$usable_words_box <- renderValueBox({
+    req(tokens())
+
+    shinydashboard::valueBox(
+      value = format(nrow(tokens()), big.mark = ","),
+      subtitle = "Usable words",
+      icon = icon("font"),
+      color = "light-blue"
     )
   })
 
-  topic_model <- reactive({
-    req(topic_dtm())
-    req(input$num_topics)
+  output$chunk_size_box <- renderValueBox({
+    req(input$chunk_size)
 
-    topicmodels::LDA(
-      topic_dtm(),
-      k = input$num_topics,
-      control = list(seed = 1234)
+    shinydashboard::valueBox(
+      value = paste(input$chunk_size, "words"),
+      subtitle = "Chunk size",
+      icon = icon("grip-lines-vertical"),
+      color = "navy"
+    )
+  })
+
+  output$estimated_chunks_box <- renderValueBox({
+    req(available_chunks())
+
+    shinydashboard::valueBox(
+      value = available_chunks(),
+      subtitle = "Estimated chunks",
+      icon = icon("copy"),
+      color = "teal"
+    )
+  })
+
+  output$suggested_chunk_size_box <- renderValueBox({
+    req(suggested_chunk_size())
+
+    shinydashboard::valueBox(
+      value = suggested_chunk_size(),
+      subtitle = "Suggested chunk size",
+      icon = icon("lightbulb"),
+      color = "purple"
+    )
+  })
+
+  output$document_guidance <- renderText({
+    req(tokens())
+
+    total_tokens <- nrow(tokens())
+
+    if (total_tokens < 500) {
+      return(
+        paste(
+          "This document has fewer than 500 usable words, so topic modeling may be less stable.",
+          "A longer document usually produces clearer topics.",
+          "Recommended chunk size:",
+          suggested_chunk_size(),
+          "."
+        )
+      )
+    }
+
+    paste(
+      "This document is long enough for topic modeling.",
+      "Recommended chunk size:",
+      suggested_chunk_size(),
+      "."
+    )
+  })
+
+  output$topic_guidance <- renderText({
+    req(available_chunks())
+
+    chunk_count <- available_chunks()
+
+    if (chunk_count < 3) {
+      return(
+        "The current chunk size creates very few chunks, so the discovered topics may be broad or mixed. Try a smaller chunk size for more detailed themes."
+      )
+    }
+
+    if (chunk_count <= 5) {
+      return(
+        paste(
+          "The current settings produce",
+          chunk_count,
+          "chunks. This is usable, but a slightly smaller chunk size may give more distinct topics."
+        )
+      )
+    }
+
+    if (chunk_count <= 10) {
+      return(
+        paste(
+          "The current settings produce",
+          chunk_count,
+          "chunks, which is a strong range for exploratory topic modeling."
+        )
+      )
+    }
+
+    paste(
+      "The current settings produce",
+      chunk_count,
+      "chunks. This gives the model many text units, but the resulting topics may become a little more fragmented."
+    )
+  })
+
+  output$topic_summary_table <- renderDT({
+    req(topic_summary())
+
+    datatable(
+      topic_summary(),
+      options = list(
+        pageLength = 5,
+        searching = FALSE,
+        paging = FALSE,
+        info = FALSE
+      ),
+      rownames = FALSE,
+      colnames = c("Topic", "Top words")
+    )
+  })
+
+  output$topic_terms_plot <- renderPlot({
+    req(topics())
+
+    plot_data <- topics() |> 
+      dplyr::mutate(
+      term = tidytext::reorder_within(term, beta, topic)
+    )
+
+    ggplot2::ggplot(plot_data, aes(x = term, y = beta, fill = topic)) +
+      geom_col(show.legend = FALSE) +
+      coord_flip() +
+      facet_wrap(~ topic, scales = "free_y") +
+      tidytext::scale_x_reordered() +
+      labs(
+        title = "Top terms per topic",
+        x = NULL,
+        y = "Topic-term probability"
+      ) +
+      theme_minimal(base_size = 13)
+  })
+
+  output$topic_distribution_plot <- renderPlot({
+  req(topic_distribution())
+
+  ggplot2::ggplot(topic_distribution(), aes(x = topic, y = probability)) +
+    geom_col(fill = "#1f5c99") +
+    labs(
+      title = "Topic Distribution",
+      x = "Topic",
+      y = "Average topic probability"
+    ) +
+    theme_minimal(base_size = 13)
+})
+
+  output$topics_table <- renderDT({
+    req(topics())
+
+    datatable(
+      topics(),
+      options = list(pageLength = 10),
+      rownames = FALSE
     )
   })
 

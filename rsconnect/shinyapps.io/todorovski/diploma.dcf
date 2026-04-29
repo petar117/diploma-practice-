@@ -5,6 +5,6 @@ account: todorovski
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 17024266
-bundleId: 11785245
+bundleId: 11920876
 url: https://todorovski.shinyapps.io/diploma/
 version: 1
