@@ -42,9 +42,24 @@ tokenize_text <- function(document, custom_stopwords) {
     )
 }
 
+tokenize_bigrams <- function(document, custom_stopwords) {
+  tibble::tibble(text = document$text) |>
+    tidytext::unnest_tokens(bigram, text, token = "ngrams", n = 2) |>
+    tidyr::separate(bigram, into = c("word1", "word2"), sep = " ") |>
+    dplyr::filter(
+      stringr::str_detect(word1, "^[a-z]+$"),
+      stringr::str_detect(word2, "^[a-z]+$")
+    ) |>
+    dplyr::filter(
+      !word1 %in% custom_stopwords$word,
+      !word2 %in% custom_stopwords$word
+    ) |>
+    dplyr::mutate(term = paste(word1, word2))
+}
+
+
 get_selected_column <- function(word_form) {
-  switch(
-    word_form,
+  switch(word_form,
     original = "word",
     lemmatized = "word_lemma",
     "word_lemma"
@@ -57,6 +72,11 @@ count_words <- function(tokens, word_form) {
   tokens |>
     dplyr::count(.data[[selected_column]], sort = TRUE, name = "count") |>
     dplyr::rename(term = 1)
+}
+
+count_bigrams <- function(bigrams) {
+  bigrams |>
+    dplyr::count(term, sort = TRUE, name = "count")
 }
 
 split_document <- function(tokens, word_form, chunk_size) {
@@ -98,23 +118,12 @@ create_topics <- function(lda_model, terms_per_topic) {
 }
 
 create_topic_summary <- function(topics) {
-  topics |> 
-    dplyr::group_by(topic) |> 
+  topics |>
+    dplyr::group_by(topic) |>
     dplyr::summarise(
-      top_words = paste(term, collapse = ', '),
+      top_words = paste(term, collapse = ", "),
       .groups = "drop"
     )
-}
-
-create_topic_distribution <- function(lda_model) {
-  gamma_matrix <- topicmodels::posterior(lda_model)$topics
-
-  topic_distribution <- colMeans(gamma_matrix)
-
-  tibble::tibble(
-    topic = paste("Topic", seq_along(topic_distribution)),
-    probability = round(as.numeric(topic_distribution), 4)
-  )
 }
 
 get_chunk_recommendation <- function(total_tokens) {
@@ -151,6 +160,15 @@ ui <- dashboardPage(
           "Lemmatized words" = "lemmatized"
         ),
         selected = "lemmatized"
+      ),
+      selectInput(
+        "token_type",
+        "Analyze text as",
+        choices = c(
+          "Single words" = "unigram",
+          "Two-word phrases" = "bigram"
+        ),
+        selected = "unigram"
       ),
       textAreaInput(
         "custom_words",
@@ -307,16 +325,18 @@ ui <- dashboardPage(
               fluidRow(
                 box(
                   width = 6,
-                  title = "Top terms",
+                  title = "Most frequent terms",
                   status = "info",
                   solidHeader = FALSE,
-                  plotOutput("bar_chart", height = "450px")
+                  height = "67vh",
+                  plotOutput("bar_chart", height = "500px")
                 ),
                 box(
                   width = 6,
                   title = "Frequency table",
                   status = "info",
                   solidHeader = FALSE,
+                  height = "67vh",
                   DTOutput("frequency_table")
                 )
               )
@@ -372,17 +392,8 @@ ui <- dashboardPage(
               fluidRow(
                 box(
                   width = 12,
-                  title = "Topic Distribution",
-                  status = "primary",
-                  solidHeader = FALSE,
-                plotOutput("topic_distribution_plot", height = "350px")
-               )
-              ),
-              fluidRow(
-                box(
-                  width = 12,
-                  title = "Topics",
-                  status = "success",
+                  title = "Topic-Term Probabilities",
+                  status = "warning",
                   solidHeader = FALSE,
                   DTOutput("topics_table")
                 )
@@ -407,12 +418,22 @@ server <- function(input, output, session) {
 
   tokens <- reactive({
     req(document())
-    tokenize_text(document(), prepare_stopwords(input$custom_words))
+
+    if (input$token_type == "bigram") {
+      tokenize_bigrams(document(), prepare_stopwords(input$custom_words))
+    } else {
+      tokenize_text(document(), prepare_stopwords(input$custom_words))
+    }
   })
 
   word_frequencies <- reactive({
     req(tokens())
-    count_words(tokens(), input$word_form)
+
+    if (input$token_type == "bigram") {
+      count_bigrams(tokens())
+    } else {
+      count_words(tokens(), input$word_form)
+    }
   })
 
   document_chunks <- reactive({
@@ -481,11 +502,6 @@ server <- function(input, output, session) {
     create_topic_summary(topics())
   })
 
-  topic_distribution <- reactive({
-    req(lda_model())
-    create_topic_distribution(lda_model())
-  })
-
   suggested_chunk_size <- reactive({
     req(tokens())
     get_chunk_recommendation(nrow(tokens()))
@@ -544,8 +560,11 @@ server <- function(input, output, session) {
     req(word_frequencies())
 
     datatable(
-      word_frequencies(),
-      options = list(pageLength = 5),
+      word_frequencies() |> dplyr::slice_head(n = 100),
+      options = list(
+        pageLength = 10,
+        scrollY = "43vh"
+      ),
       colnames = c("Term", "Frequency")
     )
   })
@@ -579,7 +598,6 @@ server <- function(input, output, session) {
       geom_col(fill = "#1f5c99") +
       coord_flip() +
       labs(
-        title = "Most frequent terms",
         x = NULL,
         y = "Count"
       ) +
@@ -699,10 +717,8 @@ server <- function(input, output, session) {
     datatable(
       topic_summary(),
       options = list(
-        pageLength = 5,
-        searching = FALSE,
-        paging = FALSE,
-        info = FALSE
+        dom = "t",
+        pageLength = 5
       ),
       rownames = FALSE,
       colnames = c("Topic", "Top words")
@@ -712,36 +728,22 @@ server <- function(input, output, session) {
   output$topic_terms_plot <- renderPlot({
     req(topics())
 
-    plot_data <- topics() |> 
+    plot_data <- topics() |>
       dplyr::mutate(
-      term = tidytext::reorder_within(term, beta, topic)
-    )
+        term = tidytext::reorder_within(term, beta, topic)
+      )
 
     ggplot2::ggplot(plot_data, aes(x = term, y = beta, fill = topic)) +
       geom_col(show.legend = FALSE) +
       coord_flip() +
-      facet_wrap(~ topic, scales = "free_y") +
+      facet_wrap(~topic, scales = "free_y") +
       tidytext::scale_x_reordered() +
       labs(
-        title = "Top terms per topic",
         x = NULL,
         y = "Topic-term probability"
       ) +
       theme_minimal(base_size = 13)
   })
-
-  output$topic_distribution_plot <- renderPlot({
-  req(topic_distribution())
-
-  ggplot2::ggplot(topic_distribution(), aes(x = topic, y = probability)) +
-    geom_col(fill = "#1f5c99") +
-    labs(
-      title = "Topic Distribution",
-      x = "Topic",
-      y = "Average topic probability"
-    ) +
-    theme_minimal(base_size = 13)
-})
 
   output$topics_table <- renderDT({
     req(topics())
@@ -749,10 +751,10 @@ server <- function(input, output, session) {
     datatable(
       topics(),
       options = list(pageLength = 10),
-      rownames = FALSE
+      rownames = FALSE,
+      colnames = c("Topic", "Term", "Importance")
     )
   })
-
 }
 
 shinyApp(ui = ui, server = server)
