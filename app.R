@@ -31,19 +31,33 @@ prepare_stopwords <- function(stopword_input) {
   )
 }
 
-tokenize_text <- function(document, custom_stopwords) {
-  tibble::tibble(text = document$text) |>
-    tidytext::unnest_tokens(word, text) |>
-    dplyr::filter(stringr::str_detect(word, "^[a-z]+$")) |>
-    dplyr::anti_join(custom_stopwords, by = "word") |>
-    dplyr::mutate(
-      token_index = dplyr::row_number(),
-      word_lemma = textstem::lemmatize_words(word)
+split_document <- function(document, segment_size) {
+  words <- document$text |> 
+    stringr::str_squish() |> 
+    strsplit("\\s+") |> 
+    unlist(use.names = FALSE)
+
+  tibble::tibble(
+    word = words,
+    segment_id = paste0("Segment ", ceiling(seq_along(words) / segment_size))
+  ) |> 
+    dplyr::group_by(segment_id) |> 
+    dplyr::summarise(
+      text = paste(word, collapse = " "),
+      .groups = "drop"
     )
 }
 
-tokenize_bigrams <- function(document, custom_stopwords) {
-  tibble::tibble(text = document$text) |>
+tokenize_segments <- function(segments, custom_stopwords) {
+  segments |> 
+    tidytext::unnest_tokens(word, text) |> 
+    dplyr::filter(stringr::str_detect(word, "^[a-z]+$")) |>
+    dplyr::anti_join(custom_stopwords, by = "word") |>
+    dplyr::mutate(word_lemma = textstem::lemmatize_words(word))
+}
+
+tokenize_bigrams <- function(segments, custom_stopwords) {
+  segments |>
     tidytext::unnest_tokens(bigram, text, token = "ngrams", n = 2) |>
     tidyr::separate(bigram, into = c("word1", "word2"), sep = " ") |>
     dplyr::filter(
@@ -56,7 +70,6 @@ tokenize_bigrams <- function(document, custom_stopwords) {
     ) |>
     dplyr::mutate(term = paste(word1, word2))
 }
-
 
 get_selected_column <- function(word_form) {
   switch(word_form,
@@ -79,21 +92,17 @@ count_bigrams <- function(bigrams) {
     dplyr::count(term, sort = TRUE, name = "count")
 }
 
-split_document <- function(tokens, word_form, chunk_size) {
+count_segment_terms <- function(tokens, word_form) {
   selected_column <- get_selected_column(word_form)
 
   tokens |>
-    dplyr::mutate(
-      chunk_id = paste0("Chunk ", ceiling(token_index / chunk_size)),
-      term = .data[[selected_column]]
-    ) |>
-    dplyr::count(chunk_id, term, name = "count", sort = FALSE)
+    dplyr::count(segment_id, term = .data[[selected_column]], sort = FALSE, name = "count")
 }
 
-create_dtm <- function(document_chunks) {
+create_dtm <- function(document_segments) {
   tidytext::cast_dtm(
-    document_chunks,
-    document = chunk_id,
+    document_segments,
+    document = segment_id,
     term = term,
     value = count
   )
@@ -126,7 +135,7 @@ create_topic_summary <- function(topics) {
     )
 }
 
-get_chunk_recommendation <- function(total_tokens) {
+get_segment_recommendation <- function(total_tokens) {
   if (total_tokens < 500) {
     return("80-120 words")
   }
@@ -205,8 +214,8 @@ ui <- dashboardPage(
         condition = "input.main_tabs == 'Topic Modeling'",
         h4("Topic Modeling Options"),
         sliderInput(
-          "chunk_size",
-          "Words per chunk",
+          "segment_size",
+          "Words per segment",
           min = 80,
           max = 320,
           value = 200,
@@ -357,9 +366,9 @@ ui <- dashboardPage(
               br(),
               fluidRow(
                 valueBoxOutput("usable_words_box", width = 3),
-                valueBoxOutput("chunk_size_box", width = 3),
-                valueBoxOutput("estimated_chunks_box", width = 3),
-                valueBoxOutput("suggested_chunk_size_box", width = 3)
+                valueBoxOutput("segment_size_box", width = 3),
+                valueBoxOutput("estimated_segments_box", width = 3),
+                valueBoxOutput("suggested_segment_size_box", width = 3)
               ),
               fluidRow(
                 box(
@@ -416,41 +425,49 @@ server <- function(input, output, session) {
     updateTextAreaInput(session, "custom_words", value = "")
   })
 
-  tokens <- reactive({
+  document_segments <- reactive({
     req(document())
+    req(input$segment_size)
+    split_document(document(), input$segment_size)
+  })
 
-    if (input$token_type == "bigram") {
-      tokenize_bigrams(document(), prepare_stopwords(input$custom_words))
-    } else {
-      tokenize_text(document(), prepare_stopwords(input$custom_words))
-    }
+  tokens <- reactive({
+    req(document_segments())
+    tokenize_segments(document_segments(), prepare_stopwords(input$custom_words))
+  })
+
+  bigrams <- reactive({
+    req(document_segments())
+    tokenize_bigrams(document_segments(), prepare_stopwords(input$custom_words))
   })
 
   word_frequencies <- reactive({
-    req(tokens())
-
     if (input$token_type == "bigram") {
-      count_bigrams(tokens())
-    } else {
+      req(bigrams())
+      count_bigrams(bigrams())
+    } 
+    
+    else {
+      req(tokens())
       count_words(tokens(), input$word_form)
     }
   })
 
-  document_chunks <- reactive({
+  segment_frequencies <- reactive({
     req(tokens())
-    split_document(tokens(), input$word_form, chunk_size = input$chunk_size)
+    count_segment_terms(tokens(), input$word_form)
   })
 
-  available_chunks <- reactive({
-    req(tokens())
-    req(input$chunk_size)
-    ceiling(nrow(tokens()) / input$chunk_size)
+  available_segments <- reactive({
+    req(document_segments())
+    req(input$segment_size)
+    ceiling(nrow(tokens()) / input$segment_size)
   })
 
   observe({
-    req(available_chunks(), input$num_topics)
+    req(available_segments(), input$num_topics)
 
-    max_topics_allowed <- min(8, max(2, available_chunks()))
+    max_topics_allowed <- min(8, max(2, available_segments()))
     topic_choices <- 2:max_topics_allowed
     selected_topics <- min(as.numeric(input$num_topics), max_topics_allowed)
 
@@ -463,15 +480,15 @@ server <- function(input, output, session) {
   })
 
   dtm <- reactive({
-    req(document_chunks())
+    req(segment_frequencies())
 
-    dtm_data <- create_dtm(document_chunks())
+    dtm_data <- create_dtm(segment_frequencies())
     dtm_dimensions <- dim(dtm_data)
 
     validate(
       need(
         dtm_dimensions[1] >= as.numeric(input$num_topics),
-        "The number of chunks must be greater or equal to the number of topics."
+        "The number of segments must be greater or equal to the number of topics."
       ),
       need(
         dtm_dimensions[2] >= as.numeric(input$num_topics),
@@ -502,9 +519,9 @@ server <- function(input, output, session) {
     create_topic_summary(topics())
   })
 
-  suggested_chunk_size <- reactive({
+  suggested_segment_size <- reactive({
     req(tokens())
-    get_chunk_recommendation(nrow(tokens()))
+    get_segment_recommendation(nrow(tokens()))
   })
 
   output$words_processed_box <- renderValueBox({
@@ -615,34 +632,34 @@ server <- function(input, output, session) {
     )
   })
 
-  output$chunk_size_box <- renderValueBox({
-    req(input$chunk_size)
+  output$segment_size_box <- renderValueBox({
+    req(input$segment_size)
 
     shinydashboard::valueBox(
-      value = paste(input$chunk_size, "words"),
-      subtitle = "Chunk size",
+      value = paste(input$segment_size, "words"),
+      subtitle = "Segment size",
       icon = icon("grip-lines-vertical"),
       color = "navy"
     )
   })
 
-  output$estimated_chunks_box <- renderValueBox({
-    req(available_chunks())
+  output$estimated_segments_box <- renderValueBox({
+    req(available_segments())
 
     shinydashboard::valueBox(
-      value = available_chunks(),
-      subtitle = "Estimated chunks",
+      value = available_segments(),
+      subtitle = "Estimated segments",
       icon = icon("copy"),
       color = "teal"
     )
   })
 
-  output$suggested_chunk_size_box <- renderValueBox({
-    req(suggested_chunk_size())
+  output$suggested_segment_size_box <- renderValueBox({
+    req(suggested_segment_size())
 
     shinydashboard::valueBox(
-      value = suggested_chunk_size(),
-      subtitle = "Suggested chunk size",
+      value = suggested_segment_size(),
+      subtitle = "Suggested segment size",
       icon = icon("lightbulb"),
       color = "purple"
     )
@@ -658,8 +675,8 @@ server <- function(input, output, session) {
         paste(
           "This document has fewer than 500 usable words, so topic modeling may be less stable.",
           "A longer document usually produces clearer topics.",
-          "Recommended chunk size:",
-          suggested_chunk_size(),
+          "Recommended segment size:",
+          suggested_segment_size(),
           "."
         )
       )
@@ -667,47 +684,47 @@ server <- function(input, output, session) {
 
     paste(
       "This document is long enough for topic modeling.",
-      "Recommended chunk size:",
-      suggested_chunk_size(),
+      "Recommended segment size:",
+      suggested_segment_size(),
       "."
     )
   })
 
   output$topic_guidance <- renderText({
-    req(available_chunks())
+    req(available_segments())
 
-    chunk_count <- available_chunks()
+    segment_count <- available_segments()
 
-    if (chunk_count < 3) {
+    if (segment_count < 3) {
       return(
-        "The current chunk size creates very few chunks, so the discovered topics may be broad or mixed. Try a smaller chunk size for more detailed themes."
+        "The current segment size creates very few segments, so the discovered topics may be broad or mixed. Try a smaller segment size for more detailed themes."
       )
     }
 
-    if (chunk_count <= 5) {
+    if (segment_count <= 5) {
       return(
         paste(
           "The current settings produce",
-          chunk_count,
-          "chunks. This is usable, but a slightly smaller chunk size may give more distinct topics."
+          segment_count,
+          "segments. This is usable, but a slightly smaller segment size may give more distinct topics."
         )
       )
     }
 
-    if (chunk_count <= 10) {
+    if (segment_count <= 10) {
       return(
         paste(
           "The current settings produce",
-          chunk_count,
-          "chunks, which is a strong range for exploratory topic modeling."
+          segment_count,
+          "segments, which is a strong range for exploratory topic modeling."
         )
       )
     }
 
     paste(
       "The current settings produce",
-      chunk_count,
-      "chunks. This gives the model many text units, but the resulting topics may become a little more fragmented."
+      segment_count,
+      "segments. This gives the model many text units, but the resulting topics may become a little more fragmented."
     )
   })
 
